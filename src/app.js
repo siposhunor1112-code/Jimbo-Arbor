@@ -235,7 +235,18 @@ export function createApp({ config, db, stripe, log = console }) {
 
   const templateParam = (req) => library.get(Number.parseInt(req.params.id, 10));
 
-  app.get('/letoltes/:id', requireMember, (req, res) => {
+  // A template row whose file went missing on disk is a 404, not a crash.
+  const fileSent = (req, res, next) => (err) => {
+    if (!err) return;
+    if (res.headersSent) return log.error(`Sending ${req.path} was interrupted`, err);
+    if (err.code === 'ENOENT') {
+      log.error(`File missing on disk for ${req.path}`);
+      return notFound(req, res);
+    }
+    next(err);
+  };
+
+  app.get('/letoltes/:id', requireMember, (req, res, next) => {
     const template = templateParam(req);
     if (!template) return notFound(req, res);
     if (template.link_url) return res.redirect(302, template.link_url);
@@ -243,14 +254,14 @@ export function createApp({ config, db, stripe, log = console }) {
     // Always a download, never rendered by the browser, whatever was uploaded.
     res.download(library.filePath(template.file_key), template.original_name, {
       headers: { 'Content-Type': 'application/octet-stream' },
-    });
+    }, fileSent(req, res, next));
   });
 
-  app.get('/elonezet/:id', requireMember, (req, res) => {
+  app.get('/elonezet/:id', requireMember, (req, res, next) => {
     const template = templateParam(req);
     if (!template?.preview_key) return notFound(req, res);
     res.set({ 'Content-Type': template.preview_mime, 'Cache-Control': 'private, max-age=3600' });
-    res.sendFile(library.filePath(template.preview_key));
+    res.sendFile(library.filePath(template.preview_key), fileSent(req, res, next));
   });
 
   // ---- Admin --------------------------------------------------------------
@@ -286,15 +297,17 @@ export function createApp({ config, db, stripe, log = console }) {
       return send(res, adminView(res, { values, error }), 400);
     }
 
+    const storedKeys = [];
     const keep = (f) => {
       if (!f) return null;
       const key = crypto.randomBytes(16).toString('hex');
       fs.renameSync(f.path, library.filePath(key));
+      storedKeys.push(key);
       return key;
     };
-    const fileKey = keep(file);
-    const previewKey = keep(preview);
     try {
+      const fileKey = keep(file);
+      const previewKey = keep(preview);
       library.add({
         title: values.title,
         description: values.description,
@@ -308,9 +321,11 @@ export function createApp({ config, db, stripe, log = console }) {
         previewMime: preview ? preview.mimetype : null,
       });
     } catch (err) {
-      library.deleteFile(fileKey);
-      library.deleteFile(previewKey);
-      throw err;
+      // Leave nothing behind: neither half-moved files nor temp uploads.
+      log.error('Saving uploaded template failed', err);
+      storedKeys.forEach((key) => library.deleteFile(key));
+      cleanup();
+      return send(res, adminView(res, { values, error: 'A sablont nem sikerült elmenteni. Próbáld újra.' }), 500);
     }
     res.redirect(303, '/admin?ok=1');
   });

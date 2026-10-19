@@ -310,6 +310,14 @@ describe('membership site', () => {
     assert.match(await refused.text(), /Tölts fel egy fájlt/);
   });
 
+  test('a template whose file is missing on disk answers 404', async () => {
+    db.prepare('INSERT INTO templates (title, category, month, file_key, original_name) VALUES (?, ?, ?, ?, ?)')
+      .run('Elveszett fájl', 'Poszt', '2026-07', 'deadbeef', 'x.zip');
+    const { id } = db.prepare("SELECT id FROM templates WHERE title = 'Elveszett fájl'").get();
+    const { cookie } = await subscribe('kata@example.com');
+    assert.equal((await get(`/letoltes/${id}`, cookie)).status, 404);
+  });
+
   test('user-supplied text is HTML-escaped', async () => {
     db.prepare('INSERT INTO templates (title, category, month, link_url) VALUES (?, ?, ?, ?)')
       .run('<script>alert(1)</script>', 'Poszt', '2026-08', 'https://example.com/x');
